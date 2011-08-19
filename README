@@ -1,0 +1,10 @@
+Class::EHierarchy
+=================
+
+Like all CPAN modules, just enter the following commands:
+
+	$ perl Makefile.PL
+	$ make
+	$ make test
+	$ make install
+

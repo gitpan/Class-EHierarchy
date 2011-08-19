@@ -1,0 +1,12 @@
+CHANGELOG
+
+v0.90 (2011/08/18)
+==================
+--Completely rewritten into something (hopefully) more useful than the
+  original incarnation.  Completely breaks old API and loses some
+  functionality, while gaining some new functionality.  Possibly more
+  congruent with the actual OOP concepts it claims to follow.
+
+v0.06 (2003/03/18)
+==================
+--Old version.  Should be ashamed of itself.  May it die in obscurity.
