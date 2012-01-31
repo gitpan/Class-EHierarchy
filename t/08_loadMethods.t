@@ -1,4 +1,4 @@
-# 06_methods.t
+# 08_loadMethods.t
 #
 # Tests the method scoping
 
@@ -9,18 +9,19 @@ use warnings;
 
 package Foo;
 
-use vars qw(@ISA);
+use vars qw(@ISA @_methods);
 use Class::EHierarchy qw(:all);
 
 @ISA = qw(Class::EHierarchy);
+@_methods = (
+    [ CEH_PRIV,  qw(mpriv) ],
+    [ CEH_RESTR, qw(mrestr) ],
+    [ CEH_PUB,   qw(mpub) ],
+    );
 
 sub _initialize ($@) {
     my $self = shift;
     my @args = @_;
-
-    _declMethod( CEH_PRIV,  qw(mpriv) );
-    _declMethod( CEH_RESTR, qw(mrestr) );
-    _declMethod( CEH_PUB,   qw(mpub) );
 
     return 1;
 }
@@ -61,18 +62,20 @@ sub callrestr {
 
 package Bar;
 
-use vars qw(@ISA);
+use vars qw(@ISA @_methods);
 use Class::EHierarchy qw(:all);
 
 @ISA = qw(Foo);
+@_methods = (
+    [ CEH_PRIV,  qw(mpriv) ],
+    [ CEH_RESTR, qw(mrestr) ],
+    [ CEH_PUB,   qw(mpub) ]
+    );
 
 sub _initialize ($@) {
     my $self = shift;
     my @args = @_;
 
-    _declMethod( CEH_PRIV,  qw(mpriv) );
-    _declMethod( CEH_RESTR, qw(mrestr) );
-    _declMethod( CEH_PUB,   qw(mpub) );
     return 1;
 }
 
@@ -164,4 +167,4 @@ ok( !$rv, 'Main calling Foo Restricted Method 1' );
 is( $class1a->mpub, 8,  'Foo Public Method 1' );
 is( $class2a->mpub, 16, 'Bar Public Method 1' );
 
-# end 06_methods.t
+# end 08_loadMethods.t

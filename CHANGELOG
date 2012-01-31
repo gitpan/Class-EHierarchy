@@ -1,5 +1,13 @@
 CHANGELOG
 
+v0.91 (2012/01/30)
+==================
+--Added automated loading of methods, properties, and default property
+  values via class variables
+--Fixed bug where every object created rewraps scoped methods in the 
+  class symbol table
+--Improved documentation with better examples and explanations
+
 v0.90 (2011/08/18)
 ==================
 --Completely rewritten into something (hopefully) more useful than the

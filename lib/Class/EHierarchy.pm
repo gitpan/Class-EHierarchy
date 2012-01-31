@@ -1,8 +1,8 @@
-# Class::EHierarchy -- Base class for handling hierarchally ordered objects
+# Class::EHierarchy -- Base class for hierarchally ordered objects
 #
 # (c) 2009, Arthur Corliss <corliss@digitalmages.com>
 #
-# $Id: EHierarchy.pm,v 0.90 2011/08/18 23:58:51 acorliss Exp $
+# $Id: EHierarchy.pm,v 0.91 2012/01/31 00:36:46 acorliss Exp $
 #
 #    This software is licensed under the same terms as Perl, itself.
 #    Please see http://dev.perl.org/licenses/ for more information.
@@ -25,7 +25,7 @@ use vars qw($VERSION @EXPORT @EXPORT_OK %EXPORT_TAGS);
 use base qw(Exporter);
 use Carp;
 
-($VERSION) = ( q$Revision: 0.90 $ =~ /(\d+(?:\.(\d+))+)/sm );
+($VERSION) = ( q$Revision: 0.91 $ =~ /(\d+(?:\.(\d+))+)/sm );
 
 # Ordinal indexes for the @objects element records
 use constant CEH_PID   => 0;
@@ -82,6 +82,10 @@ use constant CEH_NO_UNDEF => 512;
     # Properties
     #   @properties = ( { propName => [ int:attr, value ] } );
     my @properties;
+
+    # Methods
+    #   %methods = ( '__PACKAGE__::method' => 1 );
+    my %methods;
 
     # INTERNAL FUNCTIONS
 
@@ -337,16 +341,16 @@ use constant CEH_NO_UNDEF => 512;
         return $prop;
     }
 
-    sub _declProp ($$@) {
+    sub __declProp {
 
         # Purpose:  Registers list of properties as known
         # Returns:  True if successful, False otherwise
-        # Usage:    $rv = _declProp($obj, $attr, @propNames);
+        # Usage:    $rv = __declProp($caller, $obj, $attr, @propNames);
 
+        my $caller = CORE::shift;
         my $obj    = CORE::shift;
         my $attr   = CORE::shift;
         my @names  = splice @_;
-        my $caller = caller;
         my $rv     = 0;
         my $prop;
 
@@ -380,6 +384,69 @@ use constant CEH_NO_UNDEF => 512;
                       $attr & CEH_ARRAY ? []
                     : $attr & CEH_HASH  ? {}
                     :                     undef;
+            }
+        }
+
+        return $rv;
+    }
+
+    sub _declProp {
+
+        # Purpose:  Wrapper for __declProp, this is the public interface
+        # Returns:  RV of __declProp
+        # Usage:    $rv = __declProp($obj, $attr, @propNames);
+
+        my $caller = caller;
+        my @args   = splice @_;
+
+        return __declProp( $caller, @args );
+    }
+
+    sub _loadProps($$) {
+
+        # Purpose:  Loads properties from @_properties
+        # Returns:  True if all properties were correctly declared
+        # Usage:    $rv = _loadProps();
+
+        my $class = CORE::shift;
+        my $obj   = CORE::shift;
+        my $rv    = 1;
+        my ( @_properties, $prop, $pname, $pattr, $pscope );
+
+        # Get the contents of the class array
+        {
+            no strict 'refs';
+
+            @_properties = @{ *{"${class}::_properties"}{ARRAY} }
+                if defined *{"${class}::_properties"};
+        }
+
+        # Process the list
+        foreach $prop (@_properties) {
+            next unless defined $prop;
+
+            unless (
+                __declProp( $class, $obj, @$prop[ CEH_ATTR, CEH_PPKG ] ) ) {
+                $rv = 0;
+                last;
+            }
+
+            # Set the default values
+            if ( $rv and defined $$prop[CEH_PVAL] ) {
+
+                # Get the attribute type, scope, and internal prop name
+                $pattr  = $$prop[CEH_ATTR] & CEH_ATTR_TYPE;
+                $pscope = $$prop[CEH_ATTR] & CEH_ATTR_SCOPE;
+                $pname =
+                    $pscope == CEH_PRIV
+                    ? "${class}::$$prop[CEH_PPKG]"
+                    : $$prop[CEH_PPKG];
+
+                # Store the default values
+                $obj->_setProp( $pname,
+                      $pattr == CEH_ARRAY ? @{ $$prop[CEH_PVAL] }
+                    : $pattr == CEH_HASH  ? %{ $$prop[CEH_PVAL] }
+                    :                       $$prop[CEH_PVAL] );
             }
         }
 
@@ -475,21 +542,18 @@ use constant CEH_NO_UNDEF => 512;
             :                       $pval;
     }
 
-    sub _declMethod ($$@) {
+    sub __declMethod {
 
         # Purpose:  Registers a list of methods as scoped
         # Returns:  True if successful, False otherwise
-        # Usage:    $rv = _declMethod($obj, $attr, @methods);
+        # Usage:    $rv = __declMethod($class, $attr, @methods);
 
-        my $obj   = CORE::shift;
+        my $pkg   = CORE::shift;
         my $attr  = CORE::shift;
         my @names = splice @_;
-        my ( $pkg, $code, $method, $mfqn );
+        my ( $code, $method, $mfqn );
 
         if ( defined $attr ) {
-
-            # Get the method package
-            $pkg = caller;
 
             # Quiet some warnings
             no warnings qw(redefine prototype);
@@ -501,6 +565,10 @@ use constant CEH_NO_UNDEF => 512;
                 # block
                 $mfqn = "${pkg}::${method}";
                 $code = *{$mfqn}{CODE};
+
+                # Quick check to see if we've done this already -- if so
+                # we skip to the next
+                next if $methods{$mfqn};
 
                 if ( defined $code ) {
 
@@ -529,10 +597,56 @@ use constant CEH_NO_UNDEF => 512;
                 } else {
                     croak "Method $method declared but not defined";
                 }
+
+                # Record our handling of this method
+                $methods{$mfqn} = 1;
             }
         }
 
         return 1;
+    }
+
+    sub _declMethod {
+
+        # Purpose:  Wrapper for __declMethod, this is the public interface
+        # Returns:  RV of __declMethod
+        # Usage:    $rv = _declMethod($attr, @propNames);
+
+        my $caller = caller;
+        my @args   = splice @_;
+
+        return __declMethod( $caller, @args );
+    }
+
+    sub _loadMethods {
+
+        # Purpose:  Loads methods from @_methods
+        # Returns:  True if all methods were correctly declared
+        # Usage:    $rv = _loadMethods();
+
+        my $class = CORE::shift;
+        my $rv    = 1;
+        my ( @_methods, $method );
+
+        # Get the contents of the class array
+        {
+            no strict 'refs';
+
+            @_methods = @{ *{"${class}::_methods"}{ARRAY} }
+                if defined *{"${class}::_methods"};
+        }
+
+        # Process the list
+        foreach $method (@_methods) {
+            next unless defined $method;
+            unless ( __declMethod( $class, @$method[ CEH_ATTR, CEH_PPKG ] ) )
+            {
+                $rv = 0;
+                last;
+            }
+        }
+
+        return $rv;
     }
 
     # UNDOCUMENTED METHODS
@@ -610,22 +724,33 @@ use constant CEH_NO_UNDEF => 512;
         # Add our current package to the list
         CORE::unshift @classes, $class;
 
-        # Call _initialize() on all applicable superclasses
+        # Begin initialization from the top down
         foreach $tclass ( reverse @classes ) {
             unless ( $super{$tclass} ) {
-                $rv =
-                    "$tclass"->can('_initialize')
-                    ? &{"${tclass}::_initialize"}( $self, @args )
-                    : 1;
 
-                # Track each super class initialization so we only do it once
-                $super{$tclass}++;
-
+                # First autoload @_properties & @_methods
+                $rv = _loadProps( $tclass, $self ) && _loadMethods($tclass);
                 unless ($rv) {
                     _deregObj($self);
                     $self = undef;
                     last;
                 }
+
+                # Last, call _initialize()
+                $rv =
+                    defined *{"${tclass}::_initialize"}
+                    ? &{"${tclass}::_initialize"}( $self, @args )
+                    : 1;
+
+                # Track each super class initialization so we only do
+                # it once
+                $super{$tclass}++;
+            }
+
+            unless ($rv) {
+                _deregObj($self);
+                $self = undef;
+                last;
             }
         }
 
@@ -1096,37 +1221,84 @@ __END__
 
 =head1 NAME
 
-Class::EHierarchy - Base class for handling hierarchally ordered objects
+Class::EHierarchy - Base class for hierarchally ordered objects
 
 =head1 VERSION
 
-$Id: EHierarchy.pm,v 0.90 2011/08/18 23:58:51 acorliss Exp $
+$Id: EHierarchy.pm,v 0.91 2012/01/31 00:36:46 acorliss Exp $
 
 =head1 SYNOPSIS
 
-    package FooObj;
+    package TelDirectory;
 
-    sub _initalize ($@) {
+    use Class::EHierarchy qw(:all);
+    use vars qw(@ISA);
+
+    @ISA = qw(Class::EHierarchy);
+
+    sub _initalize {
         my $obj     = shift;
         my %args    = @_;
         my $rv      = 1;
 
-        if ( -t $args{FILE} ) {
-            _declProp( $obj, CEH_PRIV | CEH_SCALAR, 'counter' );
-            $obj->property( 'counter', 1 );
-            $rv = _declProp( $obj, CEH_PUB | CEH_SCALAR, keys %args );
-        } else {
-            $rv = 0;
-        }
+        
+        _declProp( $obj, CEH_PRIV | CEH_SCALAR, 'counter' );
+        _declProp( $obj, CEH_PUB | CEH_SCALAR,  'first' );
+        _declProp( $obj, CEH_PUB | CEH_SCALAR,  'last' );
+        _declProp( $obj, CEH_PUB | CEH_ARRAY,   'telephone' );
+
+        _declMethod( CEH_PRIV,    '_incrCounter' );
+        _declMethod( CEH_PUB,     'addTel' ;
 
         return $rv;
     }
 
-    sub _incCounter ($) {
+    sub _incrCounter {
         my $obj = shift;
 
-        return $obj->property('counter', $obj->property('counter') + 1 );
+        return $self->property('counter', 
+               $self->property('counter') + 1 );
     }
+
+    sub addTel {
+        my $obj     = shift;
+        my $telno   = shift;
+
+        $obj->_incrCounter;
+
+        return $obj->push('telephone', $telno);
+    }
+
+Or, alternatively (the preferred method):
+
+    package TelDirectory;
+
+    use Class::EHierarchy qw(:all);
+    use vars qw(@ISA @_properties @_methods);
+
+    @ISA = qw(Class::EHierarchy);
+    @_properties = (
+        [ CEH_PRIV | CEH_SCALAR, 'counter',  0 ],
+        [ CEH_PUB | CEH_SCALAR,  'first',   '' ],
+        [ CEH_PUB | CEH_SCALAR,  'last',    '' ],
+        [ CEH_PUB | CEH_ARRAY,   'telephone'   ]
+        );
+    @_methods = (
+        [ CEH_PRIV,    '_incrCounter' ],
+        [ CEH_PUB,     'addTel'       ]
+        );
+
+    sub _initalize {
+        my $obj     = shift;
+        my %args    = @_;
+        my $rv      = 1;
+
+        # No longer need just to declare properties/methods
+
+        return $rv;
+    }
+
+    ...
 
 =head1 DESCRIPTION
 
@@ -1149,7 +1321,7 @@ being the trunk.
 Perl uses a reference-counting garbage collection system which destroys
 objects and data structures as the last reference to it goes out of scope.
 This results in an object being destroyed before any internal data structures
-or objects is referenced internally.  In most cases this works just fine since
+or objects referenced internally.  In most cases this works just fine since
 many programs really don't care how things are destroyed, just as long as they
 are.
 
@@ -1243,9 +1415,16 @@ inaccessible.
 
 Type, if omitted, defaults to I<CEH_SCALAR>,  Scope defaults to I<CEH_PUB>.
 
+B<NOTE:>  I<CEH_NO_UNDEF> only applies to psuedo-scalar types like proper
+scalars, references, etc.  This has no effect on array members or hash values.
+
+B<NOTE:>  While it is usually not necessary to use this function if using 
+the class variable method (B<@_properties>) this function is still useful for
+creating dynamically generated properties at runtime.
+
 =head3 _declMethod
 
-    $rv = _declMethod($obj, $attr, @methods);
+    $rv = _declMethod($attr, @methods);
 
 This function is meant to be called within a subclass' I<_initialize> method
 which is called during object instantiation.  It is used to create wrappers
@@ -1255,6 +1434,13 @@ attribute.
 
 Only methods defined within the subclass can have scoping declared.  You
 cannot call this method for inherited methods.
+
+B<NOTE:> While it is usually not necessary to use this function if using the
+class variable method (B<@_methods>) this function is still useful for
+dynamically scoping methods at runtime.  That said, note that since scoping is
+applied to the class symbol table (B<not> on a per object basis) any given
+method can only be scoped once.  That means you can't do crazy things like
+make public methods private, or vice-versa.
 
 =head2 METHODS
 
@@ -1320,7 +1506,11 @@ object it had never adopted in the first place will be silently ignored and
 still return true.
 
 Disowning objects is a prerequisite for Perl's garbage collection to work and
-release those objects completely from memory.
+release those objects completely from memory.  The B<DESTROY> method provided
+by this class automatically does this for parent objects going out of scope.
+You may still need to do this explicitly if your parent object manages objects
+which may need to be released well prior to any garbage collection on the
+parent.
 
 =head3 property
 

@@ -1,7 +1,7 @@
 --- #YAML:1.0
 name:               Class-EHierarchy
-version:            0.90
-abstract:           Base class for handling hierarchally ordered objects
+version:            0.91
+abstract:           Base class for hierarchally ordered objects
 author:
     - Arthur Corliss <corliss@digitalmages.com>
 license:            perl
