@@ -1,5 +1,5 @@
 use ExtUtils::MakeMaker;
-use 5.006;
+use 5.008003;
 
 WriteMakefile(
   NAME          => 'Class::EHierarchy',

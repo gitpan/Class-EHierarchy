@@ -6,6 +6,7 @@ use Test::More tests => 25;
 
 use strict;
 use warnings;
+no warnings 'uninitialized';
 
 package Foo;
 

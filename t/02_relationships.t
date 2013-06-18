@@ -2,7 +2,7 @@
 #
 # Tests the tracking of object relationships
 
-use Test::More tests => 25;
+use Test::More tests => 27;
 
 use strict;
 use warnings;
@@ -29,17 +29,26 @@ ok( @children == 1, 'Children 4' );
 @children = $obj2->children;
 ok( @children == 1, 'Children 5' );
 
-# Test parent ID/Ref
-ok( $obj2->_parentID == $$obj1, 'Parent ID 1' );
-ok( !defined $obj2->_parentRef, 'Parent Ref 1' );
-ok( $obj3->_parentRef == $obj2, 'Parent Ref 2' );
+# Test parent
+ok( !defined $obj1->parent, 'Parent 1' );
+ok( $obj3->parent == $obj2,  'Parent 2' );
+
+# Test root
+ok( $obj3->root == $obj1, 'Root 1' );
+
+# Test descendants
+@children = $obj1->descendants;
+ok( $children[0] == $obj2, 'Descendant 1');
+ok( $children[1] == $obj3, 'Descendant 2');
 
 # Test disowning
 ok( $obj1->disown($obj2), 'Disown 1' );
 @children = $obj1->children;
 ok( @children == 0,            'Children 6' );
-ok( !defined $obj2->_parentID, 'Parent ID 2' );
+ok( !defined $obj2->parent,    'Parent 3' );
 ok( $$obj1 == 0,               'Object ID 1' );
+
+Class::EHierarchy::_dumpDiags();
 
 # Test DESTROY routines
 $obj1 = undef;
@@ -86,5 +95,11 @@ my $subobj2 = new Bar;
 
 ok( !$obj3->adopt($subobj1), 'Adopt Child 7' );
 ok( $obj3->adopt($subobj2),  'Adopt Child 8' );
+
+$obj4 = $obj1 = undef;
+Class::EHierarchy::_dumpDiags();
+
+$obj1 = new Bar;
+Class::EHierarchy::_dumpDiags();
 
 # end 02_relationships.t

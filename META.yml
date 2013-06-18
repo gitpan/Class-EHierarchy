@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Class-EHierarchy
-version:            0.91
+version:            0.92
 abstract:           Base class for hierarchally ordered objects
 author:
     - Arthur Corliss <corliss@digitalmages.com>

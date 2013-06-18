@@ -2,7 +2,7 @@
 #
 # (c) 2009, Arthur Corliss <corliss@digitalmages.com>
 #
-# $Id: EHierarchy.pm,v 0.91 2012/01/31 00:36:46 acorliss Exp $
+# $Id: EHierarchy.pm,v 0.92 2013/06/18 23:13:22 acorliss Exp $
 #
 #    This software is licensed under the same terms as Perl, itself.
 #    Please see http://dev.perl.org/licenses/ for more information.
@@ -17,21 +17,25 @@
 
 package Class::EHierarchy;
 
-use 5.006;
+use 5.008003;
 
 use strict;
 use warnings;
 use vars qw($VERSION @EXPORT @EXPORT_OK %EXPORT_TAGS);
 use base qw(Exporter);
 use Carp;
+use Scalar::Util qw(weaken);
 
-($VERSION) = ( q$Revision: 0.91 $ =~ /(\d+(?:\.(\d+))+)/sm );
+($VERSION) = ( q$Revision: 0.92 $ =~ /(\d+(?:\.(\d+))+)/sm );
 
 # Ordinal indexes for the @objects element records
-use constant CEH_PID   => 0;
-use constant CEH_PKG   => 1;
-use constant CEH_SUPER => 2;
-use constant CEH_CREF  => 3;
+use constant CEH_OREF  => 0;
+use constant CEH_PREF  => 1;
+use constant CEH_PKG   => 2;
+use constant CEH_SUPER => 3;
+use constant CEH_CREF  => 4;
+use constant CEH_CNAME => 5;
+use constant CEH_ALIAS => 6;
 
 # Ordinal indexes for the @properties element records
 use constant CEH_ATTR => 0;
@@ -60,8 +64,8 @@ use constant CEH_NO_UNDEF => 512;
 
 @EXPORT    = qw();
 @EXPORT_OK = qw(CEH_PUB CEH_RESTR CEH_PRIV CEH_SCALAR CEH_ARRAY
-    CEH_HASH CEH_CODE CEH_REF CEH_GLOB CEH_NO_UNDEF _declProp 
-    _declMethod);
+    CEH_HASH CEH_CODE CEH_REF CEH_GLOB CEH_NO_UNDEF _declProp
+    _declMethod );
 %EXPORT_TAGS = ( all => [@EXPORT_OK] );
 
 #####################################################################
@@ -73,7 +77,7 @@ use constant CEH_NO_UNDEF => 512;
 {
 
     # Object list
-    #   @objects = ( [ int:parent_id, [ ref:child_obj, ... ] ] );
+    #   @objects = ( [ ref:parent_obj, [ ref:child_obj, ... ] ] );
     my @objects;
 
     # Available IDs
@@ -86,6 +90,35 @@ use constant CEH_NO_UNDEF => 512;
     # Methods
     #   %methods = ( '__PACKAGE__::method' => 1 );
     my %methods;
+
+    # Object aliases
+    #   %aliases = ( alias => ref:obj );
+
+    sub _dumpDiags () {
+
+        # Purpose:  Dumps some diagnostic information from class structures
+        # Returns:  Boolean
+        # Usage:    _dumpDiags();
+
+        my ( $obj, @rec, $i );
+
+        warn "\nCEH Objects: @{[ scalar @objects ]}\n";
+
+        $i = 0;
+        foreach $obj (@objects) {
+            if ( defined $obj and @rec = @$obj ) {
+                foreach (@rec) {
+                    $_ = 'undef' unless defined $_;
+                }
+                warn "CEH Obj #$i: @rec\n";
+            } else {
+                warn "CEH Obj #$i: unused\n";
+            }
+            $i++;
+        }
+
+        return 1;
+    }
 
     # INTERNAL FUNCTIONS
 
@@ -101,17 +134,19 @@ use constant CEH_NO_UNDEF => 512;
     sub _regObj (@) {
 
         # Purpose:  Registers the object for tracking
-        # Returns:  True if successful
+        # Returns:  Boolean
         # Usage:    $rv = _regObj($oref);
 
         my $obj = CORE::shift;
 
         # Initialize internal tracking
         $objects[$$obj]            = [];
-        $objects[$$obj][CEH_PID]   = undef;
+        $objects[$$obj][CEH_PREF]  = undef;
         $objects[$$obj][CEH_PKG]   = ref $obj;
         $objects[$$obj][CEH_SUPER] = [];
         $objects[$$obj][CEH_CREF]  = [];
+        $objects[$$obj][CEH_CNAME] = __PACKAGE__ . '0';
+        $objects[$$obj][CEH_ALIAS] = {};
         $properties[$$obj]         = {};
 
         return 1;
@@ -120,7 +155,7 @@ use constant CEH_NO_UNDEF => 512;
     sub _deregObj (@) {
 
         # Purpose:  Removes the object from tracking
-        # Returns:  True if successful
+        # Returns:  Boolean
         # Usage:    $rv = _deregObj($oref);
 
         my $obj = CORE::shift;
@@ -132,17 +167,81 @@ use constant CEH_NO_UNDEF => 512;
         return 1;
     }
 
+    sub _mergeAliases ($$) {
+
+        # Purpose:  Merges child aliases into parent aliases
+        # Returns:  Boolean
+        # Usage:    _mergeAliases($parent, $child);
+
+        my $parent = CORE::shift;
+        my $child  = CORE::shift;
+        my ( @aliases, $alias, $class, $i );
+
+        # Preserve aliases if possible
+        @aliases = CORE::keys %{ $objects[$$child][CEH_ALIAS] };
+        foreach $alias (@aliases) {
+            if ( exists $objects[$$parent][CEH_ALIAS]{$alias} ) {
+
+                # generate new alias
+                $i     = 0;
+                $class = ref $child;
+                while ( exists $objects[$$parent][CEH_ALIAS]{"$class$i"} ) {
+                    $i++;
+                }
+                $objects[$$parent][CEH_ALIAS]{"$class$i"} =
+                    $objects[$$child][CEH_ALIAS]{$alias};
+                weaken $objects[$$parent][CEH_ALIAS]{"$class$i"};
+                $objects[$$child][CEH_CNAME] = "$class$i";
+
+            } else {
+
+                # transfer alias intact
+                $objects[$$parent][CEH_ALIAS]{$alias} =
+                    $objects[$$child][CEH_ALIAS]{$alias};
+                weaken $objects[$$parent][CEH_ALIAS]{$alias};
+            }
+        }
+
+        # Sync alias hashes
+        $objects[$$child][CEH_ALIAS] = $objects[$$parent][CEH_ALIAS];
+
+        return 1;
+    }
+
+    sub _spliceAliases ($$) {
+
+        # Purpose:  Splits the aliase tree
+        # Returns:  Boolean
+        # Usage:    _spliceAliases($parent, $child);
+
+        my $parent   = CORE::shift;
+        my $child    = CORE::shift;
+        my @children = ( $child, $child->descendants );
+        my ( $pref, $cref, $cname );
+
+        $pref = $objects[$$parent][CEH_ALIAS];
+        $cref = $objects[$$child][CEH_ALIAS] = {};
+
+        foreach $child (@children) {
+            $cname = $objects[$$child][CEH_CNAME];
+            delete $$pref{$cname};
+            $$cref{$cname} = $child;
+            weaken $$cref{$cname};
+        }
+
+        return 1;
+    }
+
     sub _assocObj ($@) {
 
         # Purpose:  Associates objects as children of the parent
-        # Returns:  True, unless circular reference is found or
-        #           a child candidate already has a parent
+        # Returns:  Boolean
         # Usage:    $rv = _assocObj( $parent, $child1, $child2 );
 
         my $parent  = CORE::shift;
         my @orphans = @_;
         my $rv      = 1;
-        my ( $orphan, @descendents, $n, $i, $irv );
+        my ( $orphan, @descendants, $n, $i, $irv, $class );
 
         foreach $orphan (@orphans) {
             if ( !defined $orphan ) {
@@ -165,7 +264,7 @@ use constant CEH_NO_UNDEF => 512;
                 $@  = "attempted to adopt one's self: $parent";
                 $rv = 0;
 
-            } elsif ( defined $objects[$$orphan][CEH_PID] ) {
+            } elsif ( defined $objects[$$orphan][CEH_PREF] ) {
 
                 # We don't allow kidnapping...
                 $@  = "attempted kidnapping of a parented child: $orphan";
@@ -177,33 +276,25 @@ use constant CEH_NO_UNDEF => 512;
                 #
                 # Now, make sure no (grand)?children of the orphan will create
                 # a circular reference
-                @descendents = @{ $objects[$$orphan][CEH_CREF] };
+                @descendants = $orphan->descendants;
                 $irv         = 1;
 
-                while (@descendents) {
-
-                    # Stop if our proposed parent is in this list
-                    if ( grep { $$_ == $$parent } @descendents ) {
-                        $@ = "circular reference detected between $parent "
-                            . "& $orphan";
-                        $irv = $rv = 0;
-                        last;
-                    }
-
-                    # Repopulate @descendents with more distant descendents
-                    $n = scalar @descendents;
-                    for ( $i = 0; $i < $n; $i++ ) {
-                        CORE::push @descendents,
-                            @{ $objects[ ${ $descendents[$i] } ][CEH_CREF] };
-                    }
-                    splice @descendents, 0, $n;
+                # Stop if our proposed parent is in this list
+                if ( grep { $$_ == $$parent } @descendants ) {
+                    $@ = "circular reference detected between $parent "
+                        . "& $orphan";
+                    $irv = $rv = 0;
                 }
 
                 if ($irv) {
 
                     # No circular references, so now let's update the records
-                    $objects[$$orphan][CEH_PID] = $$parent;
+                    $objects[$$orphan][CEH_PREF] = $parent;
+                    weaken( $objects[$$orphan][CEH_PREF] );
                     CORE::push @{ $objects[$$parent][CEH_CREF] }, $orphan;
+
+                    # Merge aliasas
+                    _mergeAliases( $parent, $orphan );
                 }
             }
         }
@@ -214,7 +305,7 @@ use constant CEH_NO_UNDEF => 512;
     sub _disassocObj ($@) {
 
         # Purpose:  Removes the child/parent relationship
-        # Returns:  True
+        # Returns:  Boolean
         # Usage:    $rv = _disassocObj($parent, $child1, $child2):
 
         my $parent   = CORE::shift;
@@ -224,49 +315,21 @@ use constant CEH_NO_UNDEF => 512;
         foreach $child (@children) {
 
             # Make sure the child actually belongs to the parent
-            if ( $objects[$$child][CEH_PID] == $$parent ) {
+            if ( $objects[$$child][CEH_PREF] == $parent ) {
 
                 # Remove the child objref from the parent's list
                 @{ $objects[$$parent][CEH_CREF] } =
                     grep { $_ != $child } @{ $objects[$$parent][CEH_CREF] };
 
                 # Update the child's record
-                $objects[$$child][CEH_PID] = undef;
+                $objects[$$child][CEH_PREF] = undef;
+
+                # Split aliases
+                _spliceAliases( $parent, $child );
             }
         }
 
         return 1;
-    }
-
-    sub _getParentRef ($) {
-
-        # Purpose:  Returns a reference to the parent object of the passed ID
-        # Returns:  undef or object ref
-        # Usage:    $oref = _getParentRef( $id );
-
-        my $id = CORE::shift;
-        my ( $pid, $gpid, $child, $pref );
-
-        # See if we have a parent to go to
-        $pid = $objects[$id][CEH_PID];
-        if ( defined $pid ) {
-
-            # We have a parent, but do we have a grandparent?
-            $gpid = $objects[$pid][CEH_PID];
-            if ( defined $gpid ) {
-
-                # Loop through grandparent's children until we find
-                # an object that matches our pid
-                foreach $child ( @{ $objects[$gpid][CEH_CREF] } ) {
-                    if ( $$child == $pid ) {
-                        $pref = $child;
-                        last;
-                    }
-                }
-            }
-        }
-
-        return $pref;
     }
 
     sub _cscope ($$) {
@@ -344,7 +407,7 @@ use constant CEH_NO_UNDEF => 512;
     sub __declProp {
 
         # Purpose:  Registers list of properties as known
-        # Returns:  True if successful, False otherwise
+        # Returns:  Boolean
         # Usage:    $rv = __declProp($caller, $obj, $attr, @propNames);
 
         my $caller = CORE::shift;
@@ -372,9 +435,9 @@ use constant CEH_NO_UNDEF => 512;
 
                 # Apply default attributes
                 $attr |= CEH_SCALAR
-                    unless $attr ^ CEH_ATTR_TYPE > 0;
+                    unless ( $attr ^ CEH_ATTR_TYPE ) > 0;
                 $attr |= CEH_PUB
-                    unless $attr ^ CEH_ATTR_SCOPE > 0;
+                    unless ( $attr ^ CEH_ATTR_SCOPE ) > 0;
 
                 # Save the properties
                 ${ $properties[$$obj] }{$prop}           = [];
@@ -405,7 +468,7 @@ use constant CEH_NO_UNDEF => 512;
     sub _loadProps($$) {
 
         # Purpose:  Loads properties from @_properties
-        # Returns:  True if all properties were correctly declared
+        # Returns:  Boolean
         # Usage:    $rv = _loadProps();
 
         my $class = CORE::shift;
@@ -457,7 +520,7 @@ use constant CEH_NO_UNDEF => 512;
 
         # Purpose:  Sets the designated property to the passed value(s).
         #           Does some rough validation according to attributes
-        # Returns:  True if successful, false otherwise
+        # Returns:  Boolean
         # Usage:    $rv = _setProp($obj, 'foo', qw(one two three));
 
         my $obj  = CORE::shift;
@@ -545,7 +608,7 @@ use constant CEH_NO_UNDEF => 512;
     sub __declMethod {
 
         # Purpose:  Registers a list of methods as scoped
-        # Returns:  True if successful, False otherwise
+        # Returns:  Boolean
         # Usage:    $rv = __declMethod($class, $attr, @methods);
 
         my $pkg   = CORE::shift;
@@ -621,7 +684,7 @@ use constant CEH_NO_UNDEF => 512;
     sub _loadMethods {
 
         # Purpose:  Loads methods from @_methods
-        # Returns:  True if all methods were correctly declared
+        # Returns:  Boolean
         # Usage:    $rv = _loadMethods();
 
         my $class = CORE::shift;
@@ -649,43 +712,19 @@ use constant CEH_NO_UNDEF => 512;
         return $rv;
     }
 
-    # UNDOCUMENTED METHODS
-
-    sub _parentID ($) {
-
-        # Purpose:  Returns the parent ID (undef if orphaned)
-        # Returns:  undef or int
-        # Usage:    $pid = $obj->_parentID;
-
-        my $self = CORE::shift;
-
-        return $objects[$$self][CEH_PID];
-    }
-
-    sub _parentRef ($) {
-
-        # Purpose:  Returns a reference to the parent object
-        # Returns:  undef or object ref
-        # Usage:    $pref = $obj->_parentRef;
-
-        my $self = CORE::shift;
-
-        return _getParentRef($$self);
-    }
-
     # PUBLISHED METHODS
 
     sub new ($;@) {
 
         # Purpose:  Object constructor
-        # Returns:  Object reference is successful, undef otherwise
+        # Returns:  Object reference
         # Usage:    $obj = Class->new(@args);
 
         my $class = CORE::shift;
         my @args  = @_;
         my $self  = bless \do { my $anon_scalar }, $class;
         my ( $rv, @classes, $tclass, $nclass, $l, $n, $isaref );
-        my %super;
+        my ( %super, $alias );
 
         # Set the id and register
         $$self = _ident();
@@ -754,7 +793,43 @@ use constant CEH_NO_UNDEF => 512;
             }
         }
 
+        # Generate alias
+        if ($self) {
+            $alias = $objects[$$self][CEH_CNAME];
+            $objects[$$self][CEH_ALIAS]{$alias} = $self;
+            weaken $objects[$$self][CEH_ALIAS]{$alias};
+        }
+
         return $self;
+    }
+
+    sub parent ($) {
+
+        # Purpose:  Returns a reference to the parent object
+        # Returns:  Object reference
+        # Usage:    $pref = $obj->parent;
+
+        my $self = CORE::shift;
+
+        return $objects[$$self][CEH_PREF];
+    }
+
+    sub root ($) {
+
+        # Purpose:  Returns a reference to the ancestral root of the object
+        #           tree
+        # Returns:  Object reference
+        # Usage:    $pref = $obj->root;
+
+        my $self = CORE::shift;
+        my ( $obj, $parent );
+
+        $obj = $self;
+        while ( defined( $parent = $obj->parent ) ) {
+            $obj = $parent;
+        }
+
+        return $obj;
     }
 
     sub children ($) {
@@ -769,6 +844,24 @@ use constant CEH_NO_UNDEF => 512;
         return @{ $objects[$$self][CEH_CREF] };
     }
 
+    sub descendants ($) {
+
+        # Purpose:  Returns a list of object references to all
+        #           (grand)children of this object
+        # Returns:  Array
+        # Usage:    @descendants = $obj->descendants;
+
+        my $self     = CORE::shift;
+        my @children = @{ $objects[$$self][CEH_CREF] };
+        my @rv       = @children;
+
+        foreach (@children) {
+            push @rv, $_->descendants;
+        }
+
+        return @rv;
+    }
+
     sub siblings ($) {
 
         # Purpose:  Returns a list of object references to this object's
@@ -777,19 +870,98 @@ use constant CEH_NO_UNDEF => 512;
         # Usage:    @crefs = $obj->siblings;
 
         my $self = CORE::shift;
-        my $pid  = $objects[$$self][CEH_PID];
+        my $pref = $objects[$$self][CEH_PREF];
         my @rv;
 
-        @rv = grep { $_ != $self } @{ $objects[$pid][CEH_CREF] }
-            if defined $pid;
+        @rv = grep { $_ != $self } @{ $objects[$$pref][CEH_CREF] }
+            if defined $pref;
 
         return @rv;
+    }
+
+    sub relative ($$) {
+
+        # Purpose:  Returns an object reference for an exact match on
+        #           an alias
+        # Returns:  Object reference
+        # Usage:    $oref = $obj->relative('foo');
+
+        my $self  = CORE::shift;
+        my $alias = CORE::shift;
+        my $rv;
+
+        if ( defined $alias ) {
+            $rv = $objects[$$self][CEH_ALIAS]{$alias}
+                if exists $objects[$$self][CEH_ALIAS]{$alias};
+        }
+
+        return $rv;
+    }
+
+    sub relatives ($$) {
+
+        # Purpose:  Returns an object reference for an regex match on
+        #           an alias
+        # Returns:  Array
+        # Usage:    $oref = $obj->relatives('foo');
+
+        my $self  = CORE::shift;
+        my $alias = CORE::shift;
+        my ( @aliases, @rv );
+
+        if ( defined $alias ) {
+            @aliases = grep m#^\Q$alias\E#sm,
+                keys %{ $objects[$$self][CEH_ALIAS] };
+            foreach $alias (@aliases) {
+                push @rv, $objects[$$self][CEH_ALIAS]{$alias};
+            }
+        }
+
+        return @rv;
+    }
+
+    sub alias ($;$) {
+
+        # Purpose:  Get/Set object alias
+        # Returns:  String/Boolean
+        # Usage:    $rv = $obj->alias;
+
+        my $self  = CORE::shift;
+        my $alias = CORE::shift;
+        my $rv;
+
+        if ( defined $alias ) {
+
+            # Set alias
+            if ( exists $objects[$$self][CEH_ALIAS]{$alias} ) {
+
+                # Alias already in use -- fail
+                $rv = 0;
+
+            } else {
+
+                # Move to new alias
+                delete $objects[$$self][CEH_ALIAS]
+                    { $objects[$$self][CEH_CNAME] };
+                $objects[$$self][CEH_ALIAS]{$alias} = $self;
+                $objects[$$self][CEH_CNAME] = $alias;
+                weaken $objects[$$self][CEH_ALIAS]{$alias};
+                $rv = 1;
+            }
+
+        } else {
+
+            # Get alias
+            $rv = $objects[$$self][CEH_CNAME];
+        }
+
+        return $rv;
     }
 
     sub adopt ($@) {
 
         # Purpose:  Adopts the passed object references as children
-        # Returns:  True if successful, False otherwise
+        # Returns:  Boolean
         # Usage:    $rv = $obj->adopt($cobj1, $cobj2);
 
         my $self     = CORE::shift;
@@ -804,7 +976,7 @@ use constant CEH_NO_UNDEF => 512;
     sub disown ($@) {
 
         # Purpose:  Disowns the passed object references as children
-        # Returns:  True if successful, False otherwise
+        # Returns:  Boolean
         # Usage:    $rv = $obj->disown($cobj1, $cobj2);
 
         my $self     = CORE::shift;
@@ -816,7 +988,7 @@ use constant CEH_NO_UNDEF => 512;
     sub property ($$;$) {
 
         # Purpose:  Gets/sets the requested property
-        # Returns:  True on value sets, value on gets
+        # Returns:  Boolean on value sets, value on gets
         # Usage:    @numbers = $obj->property('numbers');
         # Usage:    $rv = $obj->property('numbers',
         #                 qw(555-1212 999-1111));
@@ -1026,7 +1198,7 @@ use constant CEH_NO_UNDEF => 512;
     sub store ($$@) {
 
         # Purpose:  Adds elements to either an array or hash
-        # Returns:  True
+        # Returns:  Boolean
         # Usage:    $rv = $obj->add($prop, foo => bar);
         # Usage:    $rv = $obj->add($prop, 4 => foo, 5 => bar);
 
@@ -1057,7 +1229,6 @@ use constant CEH_NO_UNDEF => 512;
             while (@pairs) {
                 $i = CORE::shift @pairs;
                 $v = CORE::shift @pairs;
-
                 ${ $properties[$$self] }{$prop}[CEH_PVAL][$i] = $v;
             }
         }
@@ -1112,7 +1283,7 @@ use constant CEH_NO_UNDEF => 512;
     sub remove ($$@) {
 
         # Purpose:  Removes the specified elements from the hash or array
-        # Returns:  True
+        # Returns:  Boolean
         # Usage:    $obj->remove($prop, @keys);
 
         my $self     = CORE::shift;
@@ -1148,7 +1319,7 @@ use constant CEH_NO_UNDEF => 512;
     sub purge ($$) {
 
         # Purpose:  Empties the specified hash or array property
-        # Returns:  True
+        # Returns:  Boolean
         # Usage:    $obj->remove($prop);
 
         my $self     = CORE::shift;
@@ -1176,28 +1347,18 @@ use constant CEH_NO_UNDEF => 512;
 
         # Purpose:  Walks the child heirarchy and releases all those
         #           children before finally releasing this object
-        # Returns:  True
+        # Returns:  Boolean
         # Usage:    $obj->DESTROY;
 
         my $self = CORE::shift;
-        my ( @descendents, @cdesc, @gcdesc, $child, $parent );
+        my ( @descendants, $child, $parent );
 
         if ( defined $objects[$$self] ) {
 
-            # First, get a list of all descendents
-            @cdesc = $self->children;
-            while (@cdesc) {
-                CORE::push @descendents, @cdesc;
-                @gcdesc = ();
-                foreach $child (@cdesc) {
-                    CORE::push @gcdesc, $child->children;
-                }
-                @cdesc = @gcdesc;
-            }
-
-            # Second, working backwards we'll disown each child and release it
-            foreach $child ( reverse @descendents ) {
-                $parent = $child->_parentRef;
+            # Working backwards we'll disown each child and release it
+            @descendants = $self->descendants;
+            foreach $child ( reverse @descendants ) {
+                $parent = $child->parent;
                 $parent = $self unless defined $parent;
                 $parent->disown($child);
                 $child = undef;
@@ -1212,7 +1373,6 @@ use constant CEH_NO_UNDEF => 512;
 
         return 1;
     }
-
 }
 
 1;
@@ -1225,51 +1385,9 @@ Class::EHierarchy - Base class for hierarchally ordered objects
 
 =head1 VERSION
 
-$Id: EHierarchy.pm,v 0.91 2012/01/31 00:36:46 acorliss Exp $
+$Id: EHierarchy.pm,v 0.92 2013/06/18 23:13:22 acorliss Exp $
 
 =head1 SYNOPSIS
-
-    package TelDirectory;
-
-    use Class::EHierarchy qw(:all);
-    use vars qw(@ISA);
-
-    @ISA = qw(Class::EHierarchy);
-
-    sub _initalize {
-        my $obj     = shift;
-        my %args    = @_;
-        my $rv      = 1;
-
-        
-        _declProp( $obj, CEH_PRIV | CEH_SCALAR, 'counter' );
-        _declProp( $obj, CEH_PUB | CEH_SCALAR,  'first' );
-        _declProp( $obj, CEH_PUB | CEH_SCALAR,  'last' );
-        _declProp( $obj, CEH_PUB | CEH_ARRAY,   'telephone' );
-
-        _declMethod( CEH_PRIV,    '_incrCounter' );
-        _declMethod( CEH_PUB,     'addTel' ;
-
-        return $rv;
-    }
-
-    sub _incrCounter {
-        my $obj = shift;
-
-        return $self->property('counter', 
-               $self->property('counter') + 1 );
-    }
-
-    sub addTel {
-        my $obj     = shift;
-        my $telno   = shift;
-
-        $obj->_incrCounter;
-
-        return $obj->push('telephone', $telno);
-    }
-
-Or, alternatively (the preferred method):
 
     package TelDirectory;
 
@@ -1293,23 +1411,46 @@ Or, alternatively (the preferred method):
         my %args    = @_;
         my $rv      = 1;
 
-        # No longer need just to declare properties/methods
+        # Statically defined properties and methods are 
+        # defined above.  Dynamically generated/defined 
+        # poperties and methods can be done here.
 
         return $rv;
     }
 
     ...
 
+    package main;
+
+    use TelDirectory;
+
+    my $entry = new TelDirectory;
+
+    $entry->property('first', 'John');
+    $entry->property('last',  'Doe');
+    $entry->push('telephone', '555-111-2222', '555-555'5555');
+
 =head1 DESCRIPTION
 
-B<Class::EHierarchy> is intended for use as a base class where hierarchally
-ordered objects are desired.  This class allows you to define a parent ->
-child relationship between objects and ensures an orderly destruction of
-objects according to that relationship, instead of perl's reverse order 
-destruction sequence based on reference counting.
+B<Class::EHierarchy> is intended for use as a base class for custom objects,
+but objects that need one or more of the following features:
 
-This class also creates opaque objects to prevent any access to internal data
-except by the published interface.
+=over
+
+=item * orderly bottom-up destruction of objects
+
+=item * opaque objects
+
+=item * class-based access restrictions for properties and methods
+
+=item * primitive strict property type awareness
+
+=item * alias-based object retrieval
+
+=back
+
+Each of the above features are described in more depth in the following
+subsections:
 
 =head2 ORDERLY DESTRUCTION
 
@@ -1332,14 +1473,16 @@ object goes out of scope.  In a regular object framework the parent object
 would be released, which could be a problem if it owned the database
 connection object.  In this framework, though, the children are pre-emptively
 released first, triggering their DESTROY methods beforehand, in which the
-database commit is made.
+database commit is made:
+
+    Database Object
+        +--> Table1
+        |       +--> Row1
+        |       +--> Row2
+        +--> Table2
+                +--> Row1
 
 This, in a nutshell, is the primary purpose of this class.
-
-A few things should be mentioned:  because of how the relationships are
-tracked in the class child objects do have a reference to them stored in the
-class data structures.  This means you can't destroy a reference to them
-inside of the parent and have them reaped.  You must I<disown> them first.
 
 =head2 OPAQUE OBJECTS
 
@@ -1350,21 +1493,60 @@ outside of the published interface.  This does mean, though, that you can't
 access your data directly, either.  You must use a provided method to
 retrieve that data from the class storage.
 
-A side benefit, however, is that this provides some OOP scoping for 
-properties.  You can declare your properties as one of three scopes: 
+=head2 ACCESS RESTRICTIONS
+
+A benefit of having an opaque object is that allows for scoping of both
+properties and methods.  This provides for the following access restrictions:
 
     private         accessible only to members of this object's class
     restricted      accessible to members of this object's class  
                     and subclasses
     public          globally accessible
 
-Likewise, the same can be declared for methods.
+Attempts to access either from outside the approved scope will cause the code
+to croak.  There is an exception, however:  private properties.  This aren't
+just protected, they're hidden.  This allows various subclasses to use the
+same names for internal properties without fear of name space violations.
 
-Scoping of various members are done during object instantiation.  Examples are
-provided below.
+=head2 PROPERTY TYPE AWARENESS
 
-B<NOTE:>  private properties are not merely restricted from subclasses, they
-are also hidden, so there's no worries about naming conflicts with subclasses.
+Properties can be explicitly declared to be of certain primitive data types.
+This allows some built in validation of values being set.  Known scalar value
+types are scalar, code, glob, and reference.
+
+Properties can also house hashes and arrays.  When this is leveraged it allows
+for properties contents to be managed in ways similar to their raw
+counterparts.  You can retrieve individual elements, add, set, test for, and
+so on.
+
+=head2 ALIASES
+
+In a hierarchal system of object ownership the parent objects have strong
+references to their children.  This frees you from having to code and track
+object references yourself.  Sometimes, however, it's not always convenient or
+intuitive to remember which parent owns what objects when you have a
+multilevel hierarchy.  Because of that this class implements an alias system
+to make retrieval simpler.
+
+Aliases are unique within each hierarchy or tree.  Consider the following
+hierarchy in which every node is an object member:
+
+  Application
+     +--> Display
+     |       +--> Window1
+     |       |      +--> Widget1
+     |       |      +--> Widget2
+     |       |      +--> Widget3
+     |       +--> Window2
+     |              +--> Widget1
+     +--> Database Handle
+     +--> Network Connections
+
+Giving each node a plain name, where it makes sense, makes it trivial for a
+widget to retrieve a reference to the database object to get or update data.
+
+Aliases can also be search via base names, making it trival to get a list of
+windows that may need to be updated in a display.
 
 =head1 SUBROUTINES/METHODS
 
@@ -1377,16 +1559,63 @@ class they are all preceded by an underscore, like any other private function.
 Methods, on the other hand, are meant for direct and global use.  With the
 exception of B<new> and B<DESTROY> they should all be safe to override.
 
-=head2 SUBROUTINES/CONSTANTS
+The following subroutines, methods, and/or constants are are orgnanized
+according to their functional domain (as outlined above).
 
-=head3 _declProp
+=head2 INSTANTIATION/DESTRUCTION
 
-    $rv = _declProp($obj, SCOPE | TYPE | FLAG, @propNames);
+All classes based on this class must use the I<new> constructor and I<DESTROY>
+deconstructor provided by this class.  That said, subclasses still have an
+opportunity to do work in both phases.
 
-This function is meant to be called within a subclass' I<_initialize>
-method which is called during object instantiation.  It is used to create
-named properties while declaring they access scope and type.  The following
-constants are used to create the second argument:
+Before that, however, B<Class::EHierarchy> prepares the base object, defining
+and scoping properties and methods automatically based on the presence of
+class variables I<@_properties> and I<@_methods>:
+
+    package Contact;
+
+    use Class::EHierarchy qw(:all);
+    use vars qw(@ISA @_properties @_methods);
+
+    @ISA = qw(Class::EHierarchy);
+    @_properties = (
+        [ CEH_PUB | CEH_SCALAR, 'first' ],
+        [ CEH_PUB | CEH_SCALAR, 'last' ],
+        [ CEH_PUB | CEH_ARRAY,  'telephone' ],
+        [ CEH_PUB | CEH_SCALAR, 'email' ],
+        );
+    @_methods = (
+        [ CEH_PUB, 'full_name' ],
+        );
+
+    sub _initialize {
+        my $obj = shift;
+        my $rv  = 1;
+
+        ....
+
+        return $rv;
+    }
+
+    sub _deconstruct {
+        my $obj = shift;
+        my $rv  = 1;
+
+        ....
+
+        return $rv;
+    }
+
+    sub full_name {
+        my $obj = shift;
+
+        return $obj->property('first') . ' ' .
+               $obj->property('last');
+    }
+
+Both methods and properties are defined by their access scope.  Properties
+also add in primitive data types.  The constants used to designate these
+attributes are as follows:
 
     Scope
     ---------------------------------------------------------
@@ -1408,41 +1637,22 @@ constants are used to create the second argument:
     CEH_NO_UNDEF    No undef values are allowed to be 
                     assigned to the property
 
-Constants describing property attributes are OR'ed together, and only one
-scope and one type from each list should be used at a time.  Using multiple
-types or scopes to describe any particular property will make it essentially
-inaccessible.
+You'll note that both I<@_properties> and I<@_methods> are arrays of arrays,
+which each subarray containing the elements for each property or method.  The
+first element is always the attributes and the second the name of the property
+or method.  In the case of the former a third argument is also allowed:  a
+default value for the property:
 
-Type, if omitted, defaults to I<CEH_SCALAR>,  Scope defaults to I<CEH_PUB>.
+  @_properties = (
+        [ CEH_PUB | CEH_SCALAR, 'first',     'John' ],
+        [ CEH_PUB | CEH_SCALAR, 'last',      'Doe' ],
+        [ CEH_PUB | CEH_ARRAY,  'telephone', 
+            [ qw(555-555-1212 555-555-5555) ] ],
+    );
 
-B<NOTE:>  I<CEH_NO_UNDEF> only applies to psuedo-scalar types like proper
-scalars, references, etc.  This has no effect on array members or hash values.
-
-B<NOTE:>  While it is usually not necessary to use this function if using 
-the class variable method (B<@_properties>) this function is still useful for
-creating dynamically generated properties at runtime.
-
-=head3 _declMethod
-
-    $rv = _declMethod($attr, @methods);
-
-This function is meant to be called within a subclass' I<_initialize> method
-which is called during object instantiation.  It is used to create wrappers
-for those functions whose access you want to restrict.  It works along the
-same lines as properties and uses the same scoping constants for the
-attribute.
-
-Only methods defined within the subclass can have scoping declared.  You
-cannot call this method for inherited methods.
-
-B<NOTE:> While it is usually not necessary to use this function if using the
-class variable method (B<@_methods>) this function is still useful for
-dynamically scoping methods at runtime.  That said, note that since scoping is
-applied to the class symbol table (B<not> on a per object basis) any given
-method can only be scoped once.  That means you can't do crazy things like
-make public methods private, or vice-versa.
-
-=head2 METHODS
+Properties lacking a data type attribute default to B<CEH_SCALAR>.  Likewise,
+scope defaults to B<CEH_PUB>.  Public methods can be omitted from I<@_methods> 
+since they will be assumed to be public.
 
 =head3 new
 
@@ -1466,26 +1676,98 @@ method.
 
 =head3 _initialize
 
-    $rv = $newObj->_initialize(@newArgs);
+    sub _initialize {
+        my $obj  = shift;
+        my %args = @_;       # or @args = $_;
+        my $rv   = 1;
 
-This method is not provided by this class, but is required to be provided by
-subclasses.  It is in this method that you can declare properties and methods
-with the applicable attributes, perform validation, etc.  It must return a
-boolean value which determines if the object construction can succeed.
+        # Random initialization stuff here
 
-=head3 children
+        return $rv;
+    }
 
-    @crefs = $obj->children;
+Once the basic object has been constructed it calls the I<_initialize> method,
+giving it a complete set of the arguments the constructor was called with.
+The form of those arguments, whether as an associative array or simple array,
+is up to the coder.
 
-This method returns an array of object references to every object that was
-adopted by the current object.
+You can do whatever you want in this method, including creating and adopting
+child objects.  You can also dynamically generate properties and methods using
+the I<_declProp> and I<_declMethod> class functions.  Both are documented below.
 
-=head3 siblings
+This method must return a boolean value.  A false return value will cause the
+constructor to tear everything back down and return B<undef> to the caller.
 
-    @crefs = $obj->siblings;
+=head3 _declProp
 
-This method returns an array of object references to every object that shares
-the same parent as the current object.
+    $rv = _declProp($obj, SCOPE | TYPE | FLAG, @propNames);
+
+This function is used to create named properties while declaring they access 
+scope and type.
+
+Constants describing property attributes are OR'ed together, and only one
+scope and one type from each list should be used at a time.  Using multiple
+types or scopes to describe any particular property will make it essentially
+inaccessible.
+
+Type, if omitted, defaults to I<CEH_SCALAR>,  Scope defaults to I<CEH_PUB>.
+
+B<NOTE:>  I<CEH_NO_UNDEF> only applies to psuedo-scalar types like proper
+scalars, references, etc.  This has no effect on array members or hash values.
+
+=head3 _declMethod
+
+    $rv = _declMethod($attr, @methods);
+
+This function is is used to create wrappers for those functions whose access 
+you want to restrict.  It works along the same lines as properties and uses 
+the same scoping constants for the attribute.
+
+Only methods defined within the subclass can have scoping declared.  You
+cannot call this method for inherited methods.
+
+B<NOTE:> Since scoping is applied to the class symbol table (B<not> on a 
+per object basis) any given method can only be scoped once.  That means you 
+can't do crazy things like make public methods private, or vice-versa.
+
+=head3 DESTROY
+
+A B<DESTROY> method is provided by this class and must not be overridden by
+any subclass.  It is this method that provides the ordered termination
+property of hierarchal objects.  Any code you wish to be executed during this
+phase can be put into a B<_deconstruct> method in your subclass.  If it's
+available it will be executed after any children have been released.
+
+=head3 _deconstruct
+
+    sub _deconstruct {
+        my $obj = shift;
+        my $rv  = 1;
+
+        # Do random cleanup stuff here
+
+        return $rv;
+    }
+
+This method is optional, but if needed must be provided by the subclass.  It
+will be called during the B<DESTROY> phase of the object.
+
+=head2 ORDERLY DESTRUCTION
+
+In order for objects to be destroyed from the bottom up it is important to
+track the hierarchal relationship between them.  This class uses a familial
+parent/child paradigm for doing so.
+
+In short, objects can I<adopt> and I<disown> other objects.  Adopted objects
+become children of the parent object.  Any object being destroyed preemptively
+triggers deconstruction routines on all of its children before cleaning up
+itself.  This ensures that any child needing parental resources for final
+commits, etc., has those available.
+
+Additional methods are also present to make it easier for objects to interact
+with their immediate family of objects.  Those are documented in this section.
+More powerful methods also exist as part of the alias system and are
+documented in their own section.
 
 =head3 adopt
 
@@ -1512,6 +1794,48 @@ You may still need to do this explicitly if your parent object manages objects
 which may need to be released well prior to any garbage collection on the
 parent.
 
+=head3 parent
+
+    $parent = $obj->parent;
+
+This method returns a reference to this object's parent object, or undef if it
+has no parent.
+
+=head3 children
+
+    @crefs = $obj->children;
+
+This method returns an array of object references to every object that was
+adopted by the current object.
+
+=head3 descendants
+
+    @descendants = $obj->descendants;
+
+This method returns an array of object references to every object descended
+from the current object.
+
+=head3 siblings
+
+    @crefs = $obj->siblings;
+
+This method returns an array of object references to every object that shares
+the same parent as the current object.
+
+=head3 root
+
+    $root = $obj->root;
+
+This method returns a reference to the root object in this object's ancestral
+tree.  In other words, the senior most parent in the current hierarchy.
+
+=head2 OPAQUE OBJECTS
+
+Opaque objects can't access their own data directly, and so must use methods
+to access them.  There is one principle method for doing so, but note that in
+a later section a whole suite of convenience functions also exist to make hash
+and array property access easier.
+
 =head3 property
 
     $val = $obj->property('FooScalar');
@@ -1527,9 +1851,12 @@ checked for during assignment, as well as flags like B<CEH_NO_UNDEF>.
 
 A boolean value is returned on attempts to set values.
 
+Any attempt to access a nonexistent property will cause the code to croak.
+
 B<NOTE:> Given that the presence of additional arguments after the property
 name sets this method into 'write' mode, there is obviously no way to use this
-to empty a hash or array property.  For that please see the L<purge> method.
+to empty a hash or array property.  For that please see the L<purge> method 
+below.
 
 =head3 propertyNames
 
@@ -1538,6 +1865,19 @@ to empty a hash or array property.  For that please see the L<purge> method.
 This method returns a list of all registered properties for the current
 object.  Property names will be filtered appropriately by the caller's 
 context.
+
+=head2 ACCESS RESTRICTIONS
+
+This section is actually covered as part of L<INSTANTIATION/DESTRUCTION>
+above.
+
+=head2 PROPERTY TYPE AWARENESS
+
+Properties are validated automatically on set attempts for the various scalar
+types (code, glob, reference, scalar value), as well as arrays and hashes.
+Working through a single accessor method for individual array or hash
+elements, however, can be very inconvenient.  For that reason many common
+array/hash functions have been implemented as methods.
 
 =head3 push
 
@@ -1603,7 +1943,7 @@ are provided as ordinal index/value pairs.
 
 This method is a unified method for retrieving specific element(s) from both
 hashes and arrays.  Hash values are retrieved in the order of the specified
-keys, whils array elements are retrieved in the order of the specified ordinal
+keys, while array elements are retrieved in the order of the specified ordinal
 indexes.
 
 =head3 remove
@@ -1630,20 +1970,29 @@ B<property> again to set the new array contents.
 This is a unified method for purging the contents of both array and hash
 properties.
 
-=head3 DESTROY
+=head2 ALIASES
 
-A B<DESTROY> method is provided by this class and must not be overridden by
-any subclass.  It is this method that provides the ordered termination
-property of hierarchal objects.  Any code you wish to be executed during this
-phase can be put into a B<_deconstruct> method in your subclass.  If it's
-available it will be executed after any children have been released.
+=head3 alias
 
-=head3 _deconstruct
+    $rv = $obj->alias($new_alias);
+    $alias = $obj->alias;
 
-    $obj->_deconstruct
+This method gets/sets the alias for the object.  Gets always return a string,
+while sets return a boolean value.  This can be false if the proposed alias is
+already in use by another object in its hierarchy.
 
-This method is optional, but if needed must be provided by the subclass.  It
-will be called during the B<DESTROY> phase of the object.
+=head3 relative
+
+  $oref = $obj->relative($name);
+
+This method retrieves the object known under the passed alias.
+
+=head3 relatives
+
+  @orefs = $obj->relatives($name);
+
+This method retrieves a list of all objects with aliases beginning with the
+passed name.
 
 =head1 DEPENDENCIES
 

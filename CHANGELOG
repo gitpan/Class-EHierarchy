@@ -1,5 +1,12 @@
 CHANGELOG
 
+v0.92 (2013/06/18)
+==================
+--Added more relationship methods
+--Added alias functionality
+--Updated & improved documentation
+--Bumped minimum required perl to 5.8.3
+
 v0.91 (2012/01/30)
 ==================
 --Added automated loading of methods, properties, and default property
