@@ -2,7 +2,7 @@
 #
 # (c) 2009, Arthur Corliss <corliss@digitalmages.com>
 #
-# $Id: EHierarchy.pm,v 0.92 2013/06/18 23:13:22 acorliss Exp $
+# $Id: EHierarchy.pm,v 0.93 2013/07/07 00:17:27 acorliss Exp $
 #
 #    This software is licensed under the same terms as Perl, itself.
 #    Please see http://dev.perl.org/licenses/ for more information.
@@ -26,7 +26,7 @@ use base qw(Exporter);
 use Carp;
 use Scalar::Util qw(weaken);
 
-($VERSION) = ( q$Revision: 0.92 $ =~ /(\d+(?:\.(\d+))+)/sm );
+($VERSION) = ( q$Revision: 0.93 $ =~ /(\d+(?:\.(\d+))+)/sm );
 
 # Ordinal indexes for the @objects element records
 use constant CEH_OREF  => 0;
@@ -758,7 +758,6 @@ use constant CEH_NO_UNDEF => 512;
 
         # uniq the superclass list and save it
         %super = map { $_ => 0 } @classes;
-        @{ $objects[$$self][CEH_SUPER] } = keys %super;
 
         # Add our current package to the list
         CORE::unshift @classes, $class;
@@ -766,6 +765,9 @@ use constant CEH_NO_UNDEF => 512;
         # Begin initialization from the top down
         foreach $tclass ( reverse @classes ) {
             unless ( $super{$tclass} ) {
+
+                # Save the class list for the desconstructor
+                unshift @{ $objects[$$self][CEH_SUPER] }, $tclass;
 
                 # First autoload @_properties & @_methods
                 $rv = _loadProps( $tclass, $self ) && _loadMethods($tclass);
@@ -1351,7 +1353,7 @@ use constant CEH_NO_UNDEF => 512;
         # Usage:    $obj->DESTROY;
 
         my $self = CORE::shift;
-        my ( @descendants, $child, $parent );
+        my ( @descendants, $child, $parent, $class );
 
         if ( defined $objects[$$self] ) {
 
@@ -1364,8 +1366,12 @@ use constant CEH_NO_UNDEF => 512;
                 $child = undef;
             }
 
-            # Third, execute the _deconstruct method if it exists
-            $self->_deconstruct if $self->can('_deconstruct');
+            # Third, execute the _deconstruct from the bottom up
+            no strict 'refs';
+            foreach $class ( @{ $objects[$$self][CEH_SUPER] } ) {
+                &{"${class}::_deconstruct"}($self)
+                    if defined *{"${class}::_deconstruct"};
+            }
 
             # Fourth, deregister object
             _deregObj($self);
@@ -1385,7 +1391,7 @@ Class::EHierarchy - Base class for hierarchally ordered objects
 
 =head1 VERSION
 
-$Id: EHierarchy.pm,v 0.92 2013/06/18 23:13:22 acorliss Exp $
+$Id: EHierarchy.pm,v 0.93 2013/07/07 00:17:27 acorliss Exp $
 
 =head1 SYNOPSIS
 

@@ -1,5 +1,10 @@
 CHANGELOG
 
+v0.93 (2013/07/06)
+==================
+--Modified DESTROY method to call all superclass _deconstruct methods
+  from the bottom up
+
 v0.92 (2013/06/18)
 ==================
 --Added more relationship methods
